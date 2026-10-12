@@ -642,18 +642,6 @@ kern_return_t is_io_server_version
 }
 
 
-kern_return_t is_io_service_get_matching_service_bin
-(
-	mach_port_t master_port,
-	io_struct_inband_t matching,
-	mach_msg_type_number_t matchingCnt,
-	mach_port_t *service
-)
-{
-    STUB();
-    return KERN_NOT_SUPPORTED;
-}
-
 kern_return_t is_io_service_match_property_table_bin
 (
 	mach_port_t service,
@@ -674,22 +662,6 @@ kern_return_t is_io_service_add_notification_bin
 	mach_msg_type_number_t matchingCnt,
 	mach_port_t wake_port,
 	io_async_ref_t reference,
-	mach_msg_type_number_t referenceCnt,
-	mach_port_t *notification
-)
-{
-    STUB();
-    return KERN_NOT_SUPPORTED;
-}
-
-kern_return_t is_io_service_add_notification_bin_64
-(
-	mach_port_t master_port,
-	io_name_t notification_type,
-	io_struct_inband_t matching,
-	mach_msg_type_number_t matchingCnt,
-	mach_port_t wake_port,
-	io_async_ref64_t reference,
 	mach_msg_type_number_t referenceCnt,
 	mach_port_t *notification
 )
@@ -736,31 +708,3 @@ kern_return_t is_io_device_tree_entry_exists_with_name
 	return KERN_NOT_SUPPORTED;
 }
 
-kern_return_t is_io_registry_entry_get_properties_bin_buf
-(
-	mach_port_t registry_entry,
-	mach_vm_address_t buf,
-	mach_vm_size_t *bufsize,
-	io_buf_ptr_t *properties,
-	mach_msg_type_number_t *propertiesCnt
-)
-{
-	STUB();
-	return KERN_NOT_SUPPORTED;
-}
-
-kern_return_t is_io_registry_entry_get_property_bin_buf
-(
-	mach_port_t registry_entry,
-	io_name_t plane,
-	io_name_t property_name,
-	uint32_t options,
-	mach_vm_address_t buf,
-	mach_vm_size_t *bufsize,
-	io_buf_ptr_t *properties,
-	mach_msg_type_number_t *propertiesCnt
-)
-{
-	STUB();
-	return KERN_NOT_SUPPORTED;
-}

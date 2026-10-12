@@ -513,3 +513,86 @@ kern_return_t is_io_registry_entry_get_property_bin
     return kr;
 }
 
+
+kern_return_t is_io_registry_entry_get_property_bin_buf
+(
+	mach_port_t registry_entry,
+	io_name_t plane,
+	io_name_t property_name,
+	uint32_t options,
+	mach_vm_address_t buf,
+	mach_vm_size_t *bufsize,
+	io_buf_ptr_t *properties,
+	mach_msg_type_number_t *propertiesCnt
+)
+{
+	IORegistryEntry* e = dynamic_cast<IORegistryEntry*>(IOObject::lookup(registry_entry));
+	if (!e)
+		return kIOReturnBadArgument;
+
+	*propertiesCnt = 0;
+	*properties = nullptr;
+
+	NSString* propName = [NSString stringWithUTF8String: property_name];
+	id value = nil;
+
+	if ((options & kIORegistryIterateRecursively) && plane[0])
+		value = [findKey(e, plane, propName) objectForKey: propName];
+	else
+		value = [e->getProperties() objectForKey: propName];
+
+	if (!value)
+		return kIOReturnNotFound;
+
+	// Unlike io_registry_entry_get_property_bin, the reply carries the value itself.
+	// The caller's buffer lives in another task, so always answer out-of-line, which the
+	// protocol allows when the result does not go into 'buf'.
+	CFDataRef data = IOCFSerialize((CFTypeRef) value, kIOCFSerializeToBinary);
+	if (!data)
+		return kIOReturnNoMemory;
+
+	*propertiesCnt = CFDataGetLength(data);
+	kern_return_t kr = vm_allocate(mach_task_self(), (vm_address_t*) properties, *propertiesCnt, true);
+
+	if (kr == kIOReturnSuccess)
+		memcpy(*properties, CFDataGetBytePtr(data), *propertiesCnt);
+	else
+		*propertiesCnt = 0;
+
+	CFRelease(data);
+	return kr;
+}
+
+kern_return_t is_io_registry_entry_get_properties_bin_buf
+(
+	mach_port_t registry_entry,
+	mach_vm_address_t buf,
+	mach_vm_size_t *bufsize,
+	io_buf_ptr_t *properties,
+	mach_msg_type_number_t *propertiesCnt
+)
+{
+	IORegistryEntry* e = dynamic_cast<IORegistryEntry*>(IOObject::lookup(registry_entry));
+	if (!e)
+		return kIOReturnBadArgument;
+
+	*propertiesCnt = 0;
+	*properties = nullptr;
+
+	// The caller's buffer lives in another task, so always answer out-of-line, which the
+	// protocol allows when the result does not go into 'buf'.
+	CFDataRef data = IOCFSerialize((CFTypeRef) e->getProperties(), kIOCFSerializeToBinary);
+	if (!data)
+		return kIOReturnNoMemory;
+
+	*propertiesCnt = CFDataGetLength(data);
+	kern_return_t kr = vm_allocate(mach_task_self(), (vm_address_t*) properties, *propertiesCnt, true);
+
+	if (kr == kIOReturnSuccess)
+		memcpy(*properties, CFDataGetBytePtr(data), *propertiesCnt);
+	else
+		*propertiesCnt = 0;
+
+	CFRelease(data);
+	return kr;
+}

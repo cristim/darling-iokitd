@@ -24,6 +24,9 @@
 #include <IOKit/IOReturn.h>
 #include <os/log.h>
 #include <stdexcept>
+#include <string>
+#include <cstring>
+#include <vector>
 #include "IOIterator.h"
 
 extern "C" {
@@ -47,6 +50,16 @@ IOIterator* ServiceRegistry::iteratorForMatchingServices(NSDictionary* criteria)
 	}
 
 	return new IOIterator(matching);
+}
+
+IOObject* ServiceRegistry::firstMatchingService(NSDictionary* criteria) const
+{
+	for (IOService* service : m_registeredServices)
+	{
+		if (service->matches(criteria))
+			return service;
+	}
+	return nullptr;
 }
 
 void ServiceRegistry::registerService(IOService* service)
@@ -117,4 +130,92 @@ kern_return_t is_io_service_get_matching_services
 {
     // Old unsupported API
     return kIOReturnUnsupported;
+}
+
+static NSDictionary* unserializeMatching(const char* caller, io_struct_inband_t matching, mach_msg_type_number_t matchingCnt)
+{
+	CFStringRef errorString = nullptr;
+	CFTypeRef criteria = IOCFUnserializeBinary(matching, matchingCnt, nullptr, 0, &errorString);
+
+	if (!criteria)
+		throwCFStringException(CFSTR("cannot parse 'matching': %@"), errorString);
+
+	if (CFGetTypeID(criteria) != CFDictionaryGetTypeID())
+	{
+		CFRelease(criteria);
+		throw std::runtime_error(std::string(caller) + "(): dictionary expected");
+	}
+
+	return (NSDictionary*) criteria;
+}
+
+kern_return_t is_io_service_get_matching_service_bin
+(
+	mach_port_t master_port,
+	io_struct_inband_t matching,
+	mach_msg_type_number_t matchingCnt,
+	mach_port_t *service
+)
+{
+	*service = MACH_PORT_NULL;
+
+	try
+	{
+		NSDictionary* criteria = unserializeMatching("io_service_get_matching_service_bin", matching, matchingCnt);
+		IOObject* match = ServiceRegistry::instance()->firstMatchingService(criteria);
+		CFRelease(criteria);
+
+		if (!match)
+			return kIOReturnNotFound;
+
+		*service = match->port();
+		return kIOReturnSuccess;
+	}
+	catch (const std::exception& e)
+	{
+		os_log_error(OS_LOG_DEFAULT, "is_io_service_get_matching_service_bin: %s", e.what());
+		return kIOReturnBadArgument;
+	}
+}
+
+kern_return_t is_io_service_add_notification_bin_64
+(
+	mach_port_t master_port,
+	io_name_t notification_type,
+	io_struct_inband_t matching,
+	mach_msg_type_number_t matchingCnt,
+	mach_port_t wake_port,
+	io_async_ref64_t reference,
+	mach_msg_type_number_t referenceCnt,
+	mach_port_t *notification
+)
+{
+	*notification = MACH_PORT_NULL;
+
+	try
+	{
+		NSDictionary* criteria = unserializeMatching("io_service_add_notification_bin_64", matching, matchingCnt);
+		IOIterator* iterator;
+
+		// The registry is fixed once iokitd has started, so no service is ever published or
+		// terminated later. The notification object is the iterator of the services that match
+		// now (as in IOKit for the publish/matched types); termination types start out empty.
+		if (!strcmp(notification_type, "IOServicePublish") ||
+			!strcmp(notification_type, "IOServiceFirstMatch") ||
+			!strcmp(notification_type, "IOServiceMatched"))
+			iterator = ServiceRegistry::instance()->iteratorForMatchingServices(criteria);
+		else
+			iterator = new IOIterator(std::vector<IOObject*>());
+		CFRelease(criteria);
+
+		*notification = iterator->port();
+		iterator->releaseLater();
+
+		return kIOReturnSuccess;
+	}
+	catch (const std::exception& e)
+	{
+		os_log_error(OS_LOG_DEFAULT, "is_io_service_add_notification_bin_64: %s", e.what());
+		return kIOReturnBadArgument;
+	}
 }
