@@ -17,6 +17,8 @@ include_directories(
 	${X11_Xrandr_INCLUDE_PATH}
 )
 include_directories(BEFORE ${CMAKE_CURRENT_BINARY_DIR})
+# IOPMrootDomain.mm loads the host's libsystemd through the ELF loader.
+include_directories(${CMAKE_SOURCE_DIR}/src/startup/mldr/elfcalls)
 
 mig(iokitmig.defs)
 mig(powermanagement.defs)
@@ -39,6 +41,9 @@ set(iokitd_sources
 	src/PowerSources.mm
 	src/PowerAssertionsX11.mm
 	src/IOPlatformExpertDevice.mm
+	src/IOPMrootDomain.mm
+	src/IOInterestNotification.mm
+	src/LogindSleep.c
 	src/IOSurfaceRoot.mm
 	src/IOSurface.mm
 	src/IOUserClient.mm

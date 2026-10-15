@@ -18,6 +18,11 @@
 */
 
 #include "IOService.h"
+#include "IOInterestNotification.h"
+#include "IOUserClient.h"
+#include <algorithm>
+#include <cstring>
+#include <os/log.h>
 #import <Foundation/NSArray.h>
 
 extern "C" {
@@ -69,6 +74,92 @@ bool IOService::conformsTo(const char* className)
 	if (strcmp(className, "IOService") == 0)
 		return true;
 	return IOObject::conformsTo(className);
+}
+
+IOReturn IOService::newUserClient(uint32_t type, IOUserClient** client)
+{
+	*client = nullptr;
+	return kIOReturnUnsupported;
+}
+
+bool IOService::acceptsInterest(const char* type)
+{
+	return false;
+}
+
+void IOService::addInterest(IOInterestNotification* notification)
+{
+	m_interests.push_back(notification);
+}
+
+void IOService::removeInterest(IOInterestNotification* notification)
+{
+	m_interests.remove(notification);
+	interestRemoved(notification);
+}
+
+std::vector<IOInterestNotification*> IOService::interests(const char* type) const
+{
+	std::vector<IOInterestNotification*> result;
+	for (IOInterestNotification* notification : m_interests)
+	{
+		if (notification->interestType() == type)
+			result.push_back(notification);
+	}
+	return result;
+}
+
+kern_return_t is_io_service_open_extended
+(
+	mach_port_t service,
+	task_t owningTask,
+	uint32_t connect_type,
+	NDR_record_t ndr,
+	io_buf_ptr_t properties,
+	mach_msg_type_number_t propertiesCnt,
+	kern_return_t *result,
+	mach_port_t *connection
+)
+{
+	*connection = MACH_PORT_NULL;
+
+	// The rights and memory in the request are ours once we return success.
+	if (properties)
+		vm_deallocate(mach_task_self(), (vm_address_t) properties, propertiesCnt);
+	if (MACH_PORT_VALID(owningTask))
+		mach_port_deallocate(mach_task_self(), owningTask);
+
+	IOService* s = dynamic_cast<IOService*>(IOObject::lookup(service));
+	if (!s)
+	{
+		*result = kIOReturnBadArgument;
+		return KERN_SUCCESS;
+	}
+
+	IOUserClient* client = nullptr;
+	*result = s->newUserClient(connect_type, &client);
+
+	if (*result == kIOReturnSuccess && client)
+	{
+		*connection = client->port();
+		// The reply carries a copy of the send right; drop ours afterwards.
+		client->releaseLater();
+	}
+	else if (*result == kIOReturnSuccess)
+		*result = kIOReturnUnsupported;
+
+	return KERN_SUCCESS;
+}
+
+kern_return_t is_io_service_close
+(
+	mach_port_t connection
+)
+{
+	// The connection goes away once the caller releases its last reference.
+	if (!dynamic_cast<IOUserClient*>(IOObject::lookup(connection)))
+		return kIOReturnBadArgument;
+	return kIOReturnSuccess;
 }
 
 kern_return_t is_io_service_get_state

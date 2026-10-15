@@ -45,15 +45,6 @@ kern_return_t is_io_registry_entry_get_property_bytes
     return KERN_NOT_SUPPORTED;
 }
 
-kern_return_t is_io_service_close
-(
-	mach_port_t connection
-)
-{
-    STUB();
-    return KERN_NOT_SUPPORTED;
-}
-
 kern_return_t is_io_connect_get_service
 (
 	mach_port_t connection,
@@ -325,20 +316,6 @@ kern_return_t is_io_service_add_notification
     return KERN_NOT_SUPPORTED;
 }
 
-kern_return_t is_io_service_add_interest_notification
-(
-	mach_port_t service,
-	io_name_t type_of_interest,
-	mach_port_t wake_port,
-	io_async_ref_t reference,
-	mach_msg_type_number_t referenceCnt,
-	mach_port_t *notification
-)
-{
-    STUB();
-    return KERN_NOT_SUPPORTED;
-}
-
 kern_return_t is_io_service_acknowledge_notification
 (
 	mach_port_t service,
@@ -439,22 +416,6 @@ kern_return_t is_io_object_get_bundle_identifier
     return KERN_NOT_SUPPORTED;
 }
 
-kern_return_t is_io_service_open_extended
-(
-	mach_port_t service,
-	task_t owningTask,
-	uint32_t connect_type,
-	NDR_record_t ndr,
-	io_buf_ptr_t properties,
-	mach_msg_type_number_t propertiesCnt,
-	kern_return_t *result,
-	mach_port_t *connection
-)
-{
-    STUB();
-    return KERN_NOT_SUPPORTED;
-}
-
 kern_return_t is_io_connect_map_memory_into_task
 (
 	mach_port_t connection,
@@ -523,20 +484,6 @@ kern_return_t is_io_service_add_notification_64
 	mach_port_t master_port,
 	io_name_t notification_type,
 	io_string_t matching,
-	mach_port_t wake_port,
-	io_async_ref64_t reference,
-	mach_msg_type_number_t referenceCnt,
-	mach_port_t *notification
-)
-{
-    STUB();
-    return KERN_NOT_SUPPORTED;
-}
-
-kern_return_t is_io_service_add_interest_notification_64
-(
-	mach_port_t service,
-	io_name_t type_of_interest,
 	mach_port_t wake_port,
 	io_async_ref64_t reference,
 	mach_msg_type_number_t referenceCnt,
