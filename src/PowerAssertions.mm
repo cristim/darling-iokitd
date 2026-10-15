@@ -19,9 +19,11 @@
 
 #include "PowerAssertions.h"
 #include "PowerAssertionsX11.h"
+#include "HostPowerInhibit.h"
 #include <stdexcept>
 #include <iostream>
 #include <string>
+#include <climits>
 #include <CoreFoundation/CoreFoundation.h>
 #include <bsm/libbsm.h>
 #import <Foundation/NSString.h>
@@ -30,34 +32,52 @@ extern "C" {
 #include "powermanagementServer.h"
 }
 
+class PowerAssertionPreventIdleSleep : public PowerAssertion
+{
+	struct iokitd_power_inhibit* m_host = nullptr;
+	IOReturn activate() override
+	{
+		const auto* api = iokitd_host_power_api();
+		return api && iokitd_power_inhibit_create(api, 0, &m_host) == 0
+			? kIOReturnSuccess : kIOReturnNotReady;
+	}
+	void deactivate() override
+	{
+		iokitd_power_inhibit_destroy(m_host);
+		m_host = nullptr;
+	}
+};
+
 std::unordered_map<int, AppAssertions*> AppAssertions::m_instances;
 static std::unordered_map<std::string, PowerAssertion*> g_assertionKinds;
 
 void initPM()
 {
-	NSString* str = (NSString*) kIOPMAssertPreventUserIdleDisplaySleep;
-	g_assertionKinds.insert(std::make_pair([str UTF8String], new PowerAssertionPreventDisplaySleep));
+	// Legacy and modern spellings share one backend and one hold count.
+	static PowerAssertionPreventIdleSleep idle;
+	static PowerAssertionPreventDisplaySleep display;
+	g_assertionKinds = {
+		{[(NSString*)kIOPMAssertionTypeNoIdleSleep UTF8String], &idle},
+		{[(NSString*)kIOPMAssertPreventUserIdleSystemSleep UTF8String], &idle},
+		{[(NSString*)kIOPMAssertionTypeNoDisplaySleep UTF8String], &display},
+		{[(NSString*)kIOPMAssertPreventUserIdleDisplaySleep UTF8String], &display},
+	};
 }
 
-static PowerAssertion* getByType(NSString* type)
-{
-	auto it = g_assertionKinds.find([type UTF8String]);
-	if (it != g_assertionKinds.end())
-		return it->second;
-	return nullptr;
-}
-
-void PowerAssertion::addRef()
+IOReturn PowerAssertion::addRef()
 {
 	if (m_numHoldingApps == 0)
-		activate();
+	{
+		IOReturn result = activate();
+		if (result != kIOReturnSuccess) return result;
+	}
 	m_numHoldingApps++;
+	return kIOReturnSuccess;
 }
 
 void PowerAssertion::delRef()
 {
-	m_numHoldingApps--;
-	if (m_numHoldingApps == 0)
+	if (m_numHoldingApps > 0 && --m_numHoldingApps == 0)
 		deactivate();
 }
 
@@ -66,37 +86,31 @@ AppAssertions::AppAssertions(int pid)
 	m_processSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_PROC, pid, DISPATCH_PROC_EXIT, dispatch_get_main_queue());
 	if (!m_processSource)
 		throw std::runtime_error("dispatch_source_create(DISPATCH_SOURCE_TYPE_PROC) failed");
-
-	if (m_processSource)
-	{
-		dispatch_source_set_event_handler(m_processSource, ^{
-			m_instances.erase(pid);
-			delete this;
-		});
-		dispatch_resume(m_processSource);
-	}
+	dispatch_source_set_event_handler(m_processSource, ^{
+		m_instances.erase(pid);
+		delete this;
+	});
+	dispatch_resume(m_processSource);
 }
 
 AppAssertions::~AppAssertions()
 {
-	for (auto& [assertionId, ha] : m_heldAssertions)
-		ha.assertion->delRef();
-		
-	if (m_processSource != nullptr)
-		dispatch_release(m_processSource);
+	for (auto& item : m_heldAssertions)
+		if (item.second.enabled) item.second.assertion->delRef();
+	dispatch_source_cancel(m_processSource);
+	dispatch_release(m_processSource);
 }
 
-AppAssertions* AppAssertions::get(int pid)
+AppAssertions* AppAssertions::get(int pid, bool create)
 {
 	auto it = m_instances.find(pid);
-	if (it != m_instances.end())
-		return it->second;
-	
+	if (it != m_instances.end()) return it->second;
+	if (!create) return nullptr;
 	try
 	{
-		AppAssertions* aa = new AppAssertions(pid);
-		m_instances.insert(std::make_pair(pid, aa));
-		return aa;
+		AppAssertions* app = new AppAssertions(pid);
+		m_instances.emplace(pid, app);
+		return app;
 	}
 	catch (const std::exception& e)
 	{
@@ -108,126 +122,168 @@ AppAssertions* AppAssertions::get(int pid)
 AppAssertions::HeldAssertion* AppAssertions::getAssertion(int assertionId)
 {
 	auto it = m_heldAssertions.find(assertionId);
-	if (it != m_heldAssertions.end())
-		return &it->second;
-	return nullptr;
+	return it == m_heldAssertions.end() ? nullptr : &it->second;
 }
 
-int AppAssertions::createAssertion(PowerAssertion* which)
+IOReturn AppAssertions::createAssertion(PowerAssertion* which, bool enabled, int* assertionId)
 {
+	if (m_nextAssertionNumber == INT_MAX) return kIOReturnNoResources;
+	if (enabled)
+	{
+		IOReturn result = which->addRef();
+		if (result != kIOReturnSuccess) return result;
+	}
 	int number = m_nextAssertionNumber++;
-	HeldAssertion held = { 1, which };
-	m_heldAssertions.insert(std::make_pair(number, held));
-	which->addRef();
-	return number;
+	try { m_heldAssertions.emplace(number, HeldAssertion{1, which, enabled}); }
+	catch (...)
+	{
+		if (enabled) which->delRef();
+		return kIOReturnNoMemory;
+	}
+	*assertionId = number;
+	return kIOReturnSuccess;
+}
+
+IOReturn AppAssertions::setEnabled(HeldAssertion* held, bool enabled)
+{
+	if (held->enabled == enabled) return kIOReturnSuccess;
+	if (enabled)
+	{
+		IOReturn result = held->assertion->addRef();
+		if (result != kIOReturnSuccess) return result;
+	}
+	else held->assertion->delRef();
+	held->enabled = enabled;
+	return kIOReturnSuccess;
 }
 
 void AppAssertions::killAssertion(int assertionId)
 {
 	auto it = m_heldAssertions.find(assertionId);
-	if (it == m_heldAssertions.end())
-		return;
-
-	it->second.assertion->delRef();
+	if (it == m_heldAssertions.end()) return;
+	if (it->second.enabled) it->second.assertion->delRef();
 	m_heldAssertions.erase(it);
 }
 
-kern_return_t _io_pm_assertion_create
-(
-	mach_port_t server,
-	audit_token_t token,
-	vm_offset_t props,
-	mach_msg_type_number_t propsCnt,
-	int *assertion_id,
-	int *disableAppSleep,
-	int *enTrIntensity,
-	int *return_code
-)
+// These MIG routines return their IOReturn in return_code and KERN_SUCCESS for
+// transport. Consequently they own (and consume) the request's OOL data even
+// when validation fails; dispatch_mig_server must not destroy it a second time.
+static CFDictionaryRef copyProperties(vm_offset_t props, mach_msg_type_number_t count)
 {
-	if (!props)
-		return KERN_INVALID_ARGUMENT;
-
-	CFDataRef data = CFDataCreateWithBytesNoCopy(nullptr, (const UInt8*) props, propsCnt, kCFAllocatorNull);
-	CFDictionaryRef properties = (CFDictionaryRef) CFPropertyListCreateWithData(nullptr, data, kCFPropertyListImmutable, nullptr, nullptr);
-
-	CFRelease(data);
-
-	vm_deallocate(mach_task_self(), props, propsCnt);
-
-	if (!properties)
-		return KERN_INVALID_ARGUMENT;
-	
-	if (CFGetTypeID(properties) != CFDictionaryGetTypeID())
+	CFDictionaryRef result = nullptr;
+	if (props && count)
 	{
-		std::cerr << "Unexpected properties data type\n";
-		CFRelease(properties);
-		return KERN_INVALID_ARGUMENT;
+		CFDataRef data = CFDataCreateWithBytesNoCopy(nullptr, (const UInt8*)props, count, kCFAllocatorNull);
+		if (data)
+		{
+			result = (CFDictionaryRef)CFPropertyListCreateWithData(nullptr, data, kCFPropertyListImmutable, nullptr, nullptr);
+			CFRelease(data);
+		}
 	}
-
-	CFStringRef cftype = (CFStringRef) CFDictionaryGetValue(properties, kIOPMAssertionTypeKey);
-
-	if (!cftype || CFStringGetTypeID() != CFGetTypeID(cftype))
+	if (props) vm_deallocate(mach_task_self(), props, count);
+	if (result && CFGetTypeID(result) != CFDictionaryGetTypeID())
 	{
-		std::cerr << "kIOPMAssertionTypeKey is not a string\n";
-		CFRelease(properties);
-		return KERN_INVALID_ARGUMENT;
+		CFRelease(result);
+		result = nullptr;
 	}
-
-	PowerAssertion* pa = getByType((NSString*) cftype);
-	if (pa == nullptr)
-	{
-		std::cerr << "Unsupported assertion type\n";
-		CFRelease(properties);
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	pid_t callerPid;
-	audit_token_to_au32(token, nullptr, nullptr, nullptr, nullptr, nullptr, &callerPid, nullptr, nullptr);
-
-	// std::cout << "Creating assertion for PID " << callerPid << std::endl;
-	*assertion_id = AppAssertions::get(callerPid)->createAssertion(pa);
-	*return_code = 0;
-	
-    return KERN_SUCCESS;
+	return result;
 }
 
-kern_return_t _io_pm_assertion_retain_release
-(
-	mach_port_t server,
-	audit_token_t token,
-	int assertion_id,
-	int action,
-	int *retainCnt,
-	int *disableAppSleep,
-	int *enableAppSleep,
-	int *return_code
-)
+static bool assertionLevel(CFDictionaryRef properties, bool* enabled)
 {
+	CFTypeRef number = CFDictionaryGetValue(properties, kIOPMAssertionLevelKey);
+	if (!number) return true;
+	int level;
+	if (CFGetTypeID(number) != CFNumberGetTypeID() ||
+		!CFNumberGetValue((CFNumberRef)number, kCFNumberIntType, &level) ||
+		(level != kIOPMAssertionLevelOff && level != kIOPMAssertionLevelOn)) return false;
+	*enabled = level == kIOPMAssertionLevelOn;
+	return true;
+}
+
+kern_return_t _io_pm_assertion_create(mach_port_t server, audit_token_t token,
+	vm_offset_t props, mach_msg_type_number_t propsCnt, int* assertion_id,
+	int* disableAppSleep, int* enTrIntensity, int* return_code)
+{
+	*assertion_id = kIOPMNullAssertionID;
+	*disableAppSleep = 0;
+	*enTrIntensity = -1;
+	*return_code = kIOReturnBadArgument;
+	CFDictionaryRef properties = copyProperties(props, propsCnt);
+	if (!properties) return KERN_SUCCESS;
+	CFTypeRef type = CFDictionaryGetValue(properties, kIOPMAssertionTypeKey);
+	bool enabled = true;
+	CFTypeRef timeout = CFDictionaryGetValue(properties, kIOPMAssertionTimeoutKey);
+	double seconds = 0;
+	if (timeout && (CFGetTypeID(timeout) != CFNumberGetTypeID() ||
+		!CFNumberGetValue((CFNumberRef)timeout, kCFNumberDoubleType, &seconds)))
+		*return_code = kIOReturnBadArgument;
+	else if (seconds != 0)
+		// Timed assertions need expiration scheduling. Do not silently turn
+		// a timed request into an indefinite host inhibition.
+		*return_code = kIOReturnUnsupported;
+	else if (type && CFGetTypeID(type) == CFStringGetTypeID() && assertionLevel(properties, &enabled))
+	{
+		auto it = g_assertionKinds.find([(NSString*)type UTF8String]);
+		if (it == g_assertionKinds.end()) *return_code = kIOReturnUnsupported;
+		else
+		{
+			pid_t callerPid;
+			audit_token_to_au32(token, nullptr, nullptr, nullptr, nullptr, nullptr, &callerPid, nullptr, nullptr);
+			AppAssertions* app = AppAssertions::get(callerPid);
+			*return_code = app ? app->createAssertion(it->second, enabled, assertion_id) : kIOReturnNoResources;
+		}
+	}
+	CFRelease(properties);
+	return KERN_SUCCESS;
+}
+
+kern_return_t _io_pm_assertion_retain_release(mach_port_t server, audit_token_t token,
+	int assertion_id, int action, int* retainCnt, int* disableAppSleep,
+	int* enableAppSleep, int* return_code)
+{
+	*retainCnt = *disableAppSleep = *enableAppSleep = 0;
+	*return_code = kIOReturnNotFound;
 	pid_t callerPid;
 	audit_token_to_au32(token, nullptr, nullptr, nullptr, nullptr, nullptr, &callerPid, nullptr, nullptr);
-
-	AppAssertions* appAssertions = AppAssertions::get(callerPid);
-	AppAssertions::HeldAssertion* ha = appAssertions->getAssertion(assertion_id);
-
-	if (!ha)
-	{
-		std::cerr << "_io_pm_assertion_retain_release() cannot find assertion " << assertion_id << std::endl;
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	*return_code = 0;
+	AppAssertions* app = AppAssertions::get(callerPid, false);
+	auto* held = app ? app->getAssertion(assertion_id) : nullptr;
+	if (!held) return KERN_SUCCESS;
 	if (action == kIOPMAssertionMIGDoRetain)
 	{
-		*retainCnt = ++ha->refcount;
+		if (held->refcount == INT_MAX) { *return_code = kIOReturnNoResources; return KERN_SUCCESS; }
+		*retainCnt = ++held->refcount;
 	}
 	else if (action == kIOPMAssertionMIGDoRelease)
 	{
-		*retainCnt = --ha->refcount;
-		if (ha->refcount == 0)
-			appAssertions->killAssertion(assertion_id);
+		*retainCnt = --held->refcount;
+		if (!held->refcount) app->killAssertion(assertion_id);
 	}
-	else
-		return KERN_INVALID_ARGUMENT;
+	else { *return_code = kIOReturnBadArgument; return KERN_SUCCESS; }
+	*return_code = kIOReturnSuccess;
+	return KERN_SUCCESS;
+}
 
-    return KERN_NOT_SUPPORTED;
+kern_return_t _io_pm_assertion_set_properties(mach_port_t server, audit_token_t token,
+	int assertion_id, vm_offset_t props, mach_msg_type_number_t propsCnt,
+	int* disableAppSleep, int* enableAppSleep, int* enTrIntensity, int* return_code)
+{
+	*disableAppSleep = *enableAppSleep = 0;
+	*enTrIntensity = -1;
+	*return_code = kIOReturnBadArgument;
+	CFDictionaryRef properties = copyProperties(props, propsCnt);
+	if (!properties) return KERN_SUCCESS;
+	bool enabled = true;
+	if (CFDictionaryGetCount(properties) != 1 || !CFDictionaryContainsKey(properties, kIOPMAssertionLevelKey))
+		*return_code = kIOReturnUnsupported;
+	else if (assertionLevel(properties, &enabled))
+	{
+		pid_t callerPid;
+		audit_token_to_au32(token, nullptr, nullptr, nullptr, nullptr, nullptr, &callerPid, nullptr, nullptr);
+		AppAssertions* app = AppAssertions::get(callerPid, false);
+		auto* held = app ? app->getAssertion(assertion_id) : nullptr;
+		*return_code = held ? app->setEnabled(held, enabled) : kIOReturnNotFound;
+	}
+	CFRelease(properties);
+	return KERN_SUCCESS;
 }

@@ -106,6 +106,9 @@ struct iokitd_logind_api
 	uint64_t ack_timeout_usec;
 };
 
+/* Shared host symbol table. Only implemented in the guest iokitd bridge. */
+const struct iokitd_logind_api* iokitd_host_power_api(void);
+
 struct iokitd_logind_callbacks
 {
 	/* Suspend is imminent. Call iokitd_logind_sleep_ready(cycle) once clients agreed. */

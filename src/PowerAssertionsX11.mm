@@ -26,28 +26,37 @@
 #include <X11/extensions/dpms.h>
 #undef BOOL
 
-void PowerAssertionPreventDisplaySleep::activate()
+IOReturn PowerAssertionPreventDisplaySleep::activate()
 {
-	Display* display = IODisplayConnectX11::getDisplay();
-	if (!display)
-		return;
+	const auto* api = iokitd_host_power_api();
+	if (api && iokitd_power_inhibit_create(api, 1, &m_host) == 0)
+		return kIOReturnSuccess;
 
+	// Desktop inhibition is preferred on Wayland; retain the real X11
+	// fallback when no ScreenSaver service is available.
+	Display* display = IODisplayConnectX11::getDisplay();
 	int eventBase, errorBase;
-	if (DPMSQueryExtension(display, &eventBase, &errorBase))
-	{
-		DPMSDisable(display);
-	}
+	CARD16 power;
+	unsigned char enabled;
+	if (!display || !DPMSQueryExtension(display, &eventBase, &errorBase) ||
+		!DPMSCapable(display) || !DPMSInfo(display, &power, &enabled))
+		return kIOReturnNotReady;
+	if (api)
+		iokitd_power_inhibit_create(api, 0, &m_host);
+	m_changedDPMS = enabled;
+	if (m_changedDPMS) DPMSDisable(display);
+	XFlush(display);
+	return kIOReturnSuccess;
 }
 
 void PowerAssertionPreventDisplaySleep::deactivate()
 {
-	Display* display = IODisplayConnectX11::getDisplay();
-	if (!display)
-		return;
-
-	int eventBase, errorBase;
-	if (DPMSQueryExtension(display, &eventBase, &errorBase))
+	iokitd_power_inhibit_destroy(m_host);
+	m_host = nullptr;
+	if (m_changedDPMS)
 	{
-		DPMSEnable(display);
+		Display* display = IODisplayConnectX11::getDisplay();
+		if (display) { DPMSEnable(display); XFlush(display); }
+		m_changedDPMS = false;
 	}
 }

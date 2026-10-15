@@ -20,12 +20,16 @@
 #ifndef POWERASSERTIONSX11_H
 #define POWERASSERTIONSX11_H
 #include "PowerAssertions.h"
+#include "HostPowerInhibit.h"
 
 class PowerAssertionPreventDisplaySleep : public PowerAssertion
 {
 protected:
-	void activate() override;
+	IOReturn activate() override;
 	void deactivate() override;
+private:
+	struct iokitd_power_inhibit* m_host = nullptr;
+	bool m_changedDPMS = false;
 };
 
 #endif

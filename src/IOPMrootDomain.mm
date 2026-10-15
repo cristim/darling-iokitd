@@ -249,6 +249,15 @@ fail:
 	return false;
 }
 
+const struct iokitd_logind_api* iokitd_host_power_api(void)
+{
+	static struct iokitd_logind_api api;
+	static bool available;
+	static dispatch_once_t once;
+	dispatch_once(&once, ^{ available = loadLogindApi(&api); });
+	return available ? &api : nullptr;
+}
+
 static void logindWillSleep(void* context, uint64_t cycle)
 {
 	dispatch_async(dispatch_get_main_queue(), ^{
@@ -267,17 +276,17 @@ void IOPMrootDomain::startHostSleepMonitor()
 {
 	// Connecting and taking the inhibitor are blocking D-Bus calls.
 	dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-		static struct iokitd_logind_api api;
+		const struct iokitd_logind_api* api = iokitd_host_power_api();
 		static const struct iokitd_logind_callbacks callbacks = { logindWillSleep, logindDidWake };
 		struct iokitd_logind* logind = nullptr;
 
-		if (!loadLogindApi(&api))
+		if (!api)
 		{
 			os_log(OS_LOG_DEFAULT, "iokitd: host libsystemd not available, no sleep/wake notifications");
 			return;
 		}
 
-		int r = iokitd_logind_start(&api, &callbacks, nullptr, &logind);
+		int r = iokitd_logind_start(api, &callbacks, nullptr, &logind);
 		if (r < 0)
 		{
 			os_log(OS_LOG_DEFAULT, "iokitd: logind sleep monitor not started (%d), no sleep/wake notifications", r);

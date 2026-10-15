@@ -44,6 +44,7 @@ set(iokitd_sources
 	src/IOPMrootDomain.mm
 	src/IOInterestNotification.mm
 	src/LogindSleep.c
+	src/HostPowerInhibit.c
 	src/IOSurfaceRoot.mm
 	src/IOSurface.mm
 	src/IOUserClient.mm
